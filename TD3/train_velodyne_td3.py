@@ -1,3 +1,4 @@
+import json
 import os
 import time
 
@@ -12,30 +13,113 @@ from replay_buffer import ReplayBuffer
 from velodyne_env import GazeboEnv
 
 
+EVALUATION_DTYPE = np.dtype(
+    [
+        ("timestep", np.int64),
+        ("epoch", np.int64),
+        ("evaluation_episodes", np.int64),
+        ("average_reward", np.float64),
+        ("collision_rate", np.float64),
+        ("success_rate", np.float64),
+        ("average_steps_to_goal", np.float64),
+        ("average_episode_steps", np.float64),
+    ]
+)
+
+
 def evaluate(network, epoch, eval_episodes=10):
-    avg_reward = 0.0
-    col = 0
+    episode_rewards = []
+    episode_steps = []
+    successful_steps = []
+    collision_episodes = 0
+    successful_episodes = 0
+
     for _ in range(eval_episodes):
         count = 0
+        episode_reward = 0.0
+        reached_goal = False
+        collision = False
         state = env.reset()
         done = False
-        while not done and count < 501:
+        while not done and count < max_ep:
             action = network.get_action(np.array(state))
             a_in = [(action[0] + 1) / 2, action[1]]
-            state, reward, done, _ = env.step(a_in)
-            avg_reward += reward
+            state, reward, done, target = env.step(a_in)
+            episode_reward += reward
             count += 1
-            if reward < -90:
-                col += 1
-    avg_reward /= eval_episodes
-    avg_col = col / eval_episodes
+            reached_goal = reached_goal or target
+            collision = collision or reward < -90
+
+        episode_rewards.append(episode_reward)
+        episode_steps.append(count)
+        if reached_goal:
+            successful_episodes += 1
+            successful_steps.append(count)
+        if collision:
+            collision_episodes += 1
+
+    average_reward = float(np.mean(episode_rewards))
+    collision_rate = collision_episodes / float(eval_episodes)
+    success_rate = successful_episodes / float(eval_episodes)
+    average_steps_to_goal = (
+        float(np.mean(successful_steps)) if successful_steps else None
+    )
+    average_episode_steps = float(np.mean(episode_steps))
+
+    metrics = {
+        "epoch": int(epoch),
+        "evaluation_episodes": int(eval_episodes),
+        "average_reward": average_reward,
+        "collision_rate": collision_rate,
+        "success_rate": success_rate,
+        "average_steps_to_goal": average_steps_to_goal,
+        "average_episode_steps": average_episode_steps,
+    }
+
     print("..............................................")
     print(
-        "Average Reward over %i Evaluation Episodes, Epoch %i: %f, %f"
-        % (eval_episodes, epoch, avg_reward, avg_col)
+        "Evaluation Epoch %i: reward=%.3f, collision_rate=%.2f%%, "
+        "success_rate=%.2f%%, steps_to_goal=%s, episode_steps=%.2f"
+        % (
+            epoch,
+            average_reward,
+            collision_rate * 100,
+            success_rate * 100,
+            "N/A"
+            if average_steps_to_goal is None
+            else "%.2f" % average_steps_to_goal,
+            average_episode_steps,
+        )
     )
     print("..............................................")
-    return avg_reward
+    return metrics
+
+
+def save_evaluations(evaluations, result_path):
+    """Save named numeric metrics in .npy and human-readable records in .json."""
+    records = []
+    rows = []
+    for evaluation in evaluations:
+        record = dict(evaluation)
+        records.append(record)
+        rows.append(
+            (
+                record["timestep"],
+                record["epoch"],
+                record["evaluation_episodes"],
+                record["average_reward"],
+                record["collision_rate"],
+                record["success_rate"],
+                np.nan
+                if record["average_steps_to_goal"] is None
+                else record["average_steps_to_goal"],
+                record["average_episode_steps"],
+            )
+        )
+
+    np.save(result_path, np.asarray(rows, dtype=EVALUATION_DTYPE))
+    with open(result_path + ".json", "w", encoding="utf-8", newline="\n") as file:
+        json.dump(records, file, ensure_ascii=False, indent=2, allow_nan=False)
 
 
 class Actor(nn.Module):
@@ -301,11 +385,11 @@ while timestep < max_timesteps:
         if timesteps_since_eval >= eval_freq:
             print("Validating")
             timesteps_since_eval %= eval_freq
-            evaluations.append(
-                evaluate(network=network, epoch=epoch, eval_episodes=eval_ep)
-            )
+            evaluation = evaluate(network=network, epoch=epoch, eval_episodes=eval_ep)
+            evaluation["timestep"] = int(timestep)
+            evaluations.append(evaluation)
             network.save(file_name, directory="./pytorch_models")
-            np.save("./results/%s" % (file_name), evaluations)
+            save_evaluations(evaluations, "./results/%s" % file_name)
             epoch += 1
 
         state = env.reset()
@@ -358,7 +442,9 @@ while timestep < max_timesteps:
     timesteps_since_eval += 1
 
 # After the training is done, evaluate the network and save it
-evaluations.append(evaluate(network=network, epoch=epoch, eval_episodes=eval_ep))
+evaluation = evaluate(network=network, epoch=epoch, eval_episodes=eval_ep)
+evaluation["timestep"] = int(timestep)
+evaluations.append(evaluation)
 if save_model:
     network.save("%s" % file_name, directory="./pytorch_models")
-np.save("./results/%s" % file_name, evaluations)
+save_evaluations(evaluations, "./results/%s" % file_name)

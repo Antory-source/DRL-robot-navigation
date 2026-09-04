@@ -98,3 +98,11 @@ Rviz:
     <img width=80% src="https://github.com/reiniscimurs/DRL-robot-navigation/blob/main/velodyne.png">
 </p>
 
+Evaluation results are saved in `TD3/results/TD3_velodyne.npy` as a named numeric
+record. A human-readable copy is also written to
+`TD3/results/TD3_velodyne.json`. Each evaluation records the timestep, average
+reward, collision rate, goal success rate, average steps to goal for successful
+episodes, and average episode length. If no evaluation episode reaches the goal,
+`average_steps_to_goal` is recorded as `null` in JSON and `NaN` in the numeric
+array.
+
