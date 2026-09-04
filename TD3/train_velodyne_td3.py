@@ -19,20 +19,22 @@ EVALUATION_DTYPE = np.dtype(
         ("epoch", np.int64),
         ("evaluation_episodes", np.int64),
         ("average_reward", np.float64),
-        ("collision_rate", np.float64),
         ("success_rate", np.float64),
+        ("collision_rate", np.float64),
+        ("timeout_rate", np.float64),
         ("average_steps_to_goal", np.float64),
         ("average_episode_steps", np.float64),
     ]
 )
 
 
-def evaluate(network, epoch, eval_episodes=10):
+def evaluate(network, epoch, timestep, eval_episodes=10):
     episode_rewards = []
     episode_steps = []
     successful_steps = []
     collision_episodes = 0
     successful_episodes = 0
+    timeout_episodes = 0
 
     for _ in range(eval_episodes):
         count = 0
@@ -48,6 +50,9 @@ def evaluate(network, epoch, eval_episodes=10):
             episode_reward += reward
             count += 1
             reached_goal = reached_goal or target
+            # This relies on the environment assigning collision rewards below -90.
+            # If that reward definition changes, the environment should return a
+            # collision flag directly instead.
             collision = collision or reward < -90
 
         episode_rewards.append(episode_reward)
@@ -55,44 +60,88 @@ def evaluate(network, epoch, eval_episodes=10):
         if reached_goal:
             successful_episodes += 1
             successful_steps.append(count)
-        if collision:
+        elif collision:
             collision_episodes += 1
+        elif count >= max_ep:
+            timeout_episodes += 1
+        else:
+            raise RuntimeError(
+                "Evaluation episode ended without success, collision, or timeout"
+            )
+
+    classified_episodes = (
+        successful_episodes + collision_episodes + timeout_episodes
+    )
+    if classified_episodes != eval_episodes:
+        raise RuntimeError("Evaluation episode classification is inconsistent")
 
     average_reward = float(np.mean(episode_rewards))
-    collision_rate = collision_episodes / float(eval_episodes)
     success_rate = successful_episodes / float(eval_episodes)
+    collision_rate = collision_episodes / float(eval_episodes)
+    timeout_rate = timeout_episodes / float(eval_episodes)
     average_steps_to_goal = (
         float(np.mean(successful_steps)) if successful_steps else None
     )
     average_episode_steps = float(np.mean(episode_steps))
 
     metrics = {
+        "timestep": int(timestep),
         "epoch": int(epoch),
         "evaluation_episodes": int(eval_episodes),
         "average_reward": average_reward,
-        "collision_rate": collision_rate,
         "success_rate": success_rate,
+        "collision_rate": collision_rate,
+        "timeout_rate": timeout_rate,
         "average_steps_to_goal": average_steps_to_goal,
         "average_episode_steps": average_episode_steps,
     }
 
     print("..............................................")
+    print("Evaluation #%i" % epoch)
+    print("Timestep              : %i" % timestep)
+    print("Episodes              : %i" % eval_episodes)
+    print("Average Reward        : %.2f" % average_reward)
+    print("Success Rate          : %.2f %%" % (success_rate * 100))
+    print("Collision Rate        : %.2f %%" % (collision_rate * 100))
+    print("Timeout Rate          : %.2f %%" % (timeout_rate * 100))
     print(
-        "Evaluation Epoch %i: reward=%.3f, collision_rate=%.2f%%, "
-        "success_rate=%.2f%%, steps_to_goal=%s, episode_steps=%.2f"
+        "Avg Steps to Goal     : %s"
         % (
-            epoch,
-            average_reward,
-            collision_rate * 100,
-            success_rate * 100,
             "N/A"
             if average_steps_to_goal is None
-            else "%.2f" % average_steps_to_goal,
-            average_episode_steps,
+            else "%.2f" % average_steps_to_goal
         )
     )
+    print("Avg Episode Steps     : %.2f" % average_episode_steps)
     print("..............................................")
     return metrics
+
+
+def log_evaluation(network, evaluation):
+    timestep = evaluation["timestep"]
+    network.writer.add_scalar(
+        "Evaluation/Average Reward", evaluation["average_reward"], timestep
+    )
+    network.writer.add_scalar(
+        "Evaluation/Success Rate", evaluation["success_rate"], timestep
+    )
+    network.writer.add_scalar(
+        "Evaluation/Collision Rate", evaluation["collision_rate"], timestep
+    )
+    network.writer.add_scalar(
+        "Evaluation/Timeout Rate", evaluation["timeout_rate"], timestep
+    )
+    if evaluation["average_steps_to_goal"] is not None:
+        network.writer.add_scalar(
+            "Evaluation/Average Steps to Goal",
+            evaluation["average_steps_to_goal"],
+            timestep,
+        )
+    network.writer.add_scalar(
+        "Evaluation/Average Episode Steps",
+        evaluation["average_episode_steps"],
+        timestep,
+    )
 
 
 def save_evaluations(evaluations, result_path):
@@ -108,8 +157,9 @@ def save_evaluations(evaluations, result_path):
                 record["epoch"],
                 record["evaluation_episodes"],
                 record["average_reward"],
-                record["collision_rate"],
                 record["success_rate"],
+                record["collision_rate"],
+                record["timeout_rate"],
                 np.nan
                 if record["average_steps_to_goal"] is None
                 else record["average_steps_to_goal"],
@@ -385,8 +435,13 @@ while timestep < max_timesteps:
         if timesteps_since_eval >= eval_freq:
             print("Validating")
             timesteps_since_eval %= eval_freq
-            evaluation = evaluate(network=network, epoch=epoch, eval_episodes=eval_ep)
-            evaluation["timestep"] = int(timestep)
+            evaluation = evaluate(
+                network=network,
+                epoch=epoch,
+                timestep=timestep,
+                eval_episodes=eval_ep,
+            )
+            log_evaluation(network, evaluation)
             evaluations.append(evaluation)
             network.save(file_name, directory="./pytorch_models")
             save_evaluations(evaluations, "./results/%s" % file_name)
@@ -442,8 +497,10 @@ while timestep < max_timesteps:
     timesteps_since_eval += 1
 
 # After the training is done, evaluate the network and save it
-evaluation = evaluate(network=network, epoch=epoch, eval_episodes=eval_ep)
-evaluation["timestep"] = int(timestep)
+evaluation = evaluate(
+    network=network, epoch=epoch, timestep=timestep, eval_episodes=eval_ep
+)
+log_evaluation(network, evaluation)
 evaluations.append(evaluation)
 if save_model:
     network.save("%s" % file_name, directory="./pytorch_models")
