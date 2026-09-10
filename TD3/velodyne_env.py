@@ -9,7 +9,8 @@ import numpy as np
 import rospy
 import sensor_msgs.point_cloud2 as pc2
 from gazebo_msgs.msg import ModelState
-from geometry_msgs.msg import Twist
+from gazebo_msgs.srv import DeleteModel, SpawnModel
+from geometry_msgs.msg import Pose, Twist
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import PointCloud2
 from squaternion import Quaternion
@@ -120,6 +121,8 @@ class GazeboEnv:
         self.unpause = rospy.ServiceProxy("/gazebo/unpause_physics", Empty)
         self.pause = rospy.ServiceProxy("/gazebo/pause_physics", Empty)
         self.reset_proxy = rospy.ServiceProxy("/gazebo/reset_world", Empty)
+        self.spawn_model = rospy.ServiceProxy("/gazebo/spawn_sdf_model", SpawnModel)
+        self.delete_model = rospy.ServiceProxy("/gazebo/delete_model", DeleteModel)
         self.publisher = rospy.Publisher("goal_point", MarkerArray, queue_size=3)
         self.publisher2 = rospy.Publisher("linear_velocity", MarkerArray, queue_size=1)
         self.publisher3 = rospy.Publisher("angular_velocity", MarkerArray, queue_size=1)
@@ -268,6 +271,7 @@ class GazeboEnv:
         self.change_goal()
         # randomly scatter boxes in the environment
         self.random_box()
+        self.update_gazebo_visual_markers()
         self.publish_markers([0.0, 0.0])
 
         rospy.wait_for_service("/gazebo/unpause_physics")
@@ -358,6 +362,89 @@ class GazeboEnv:
             box_state.pose.orientation.z = 0.0
             box_state.pose.orientation.w = 1.0
             self.set_state.publish(box_state)
+
+    def spawn_visual_marker(self, name, x, y, color):
+        red, green, blue = color
+        marker_sdf = """<?xml version="1.0"?>
+<sdf version="1.6">
+  <model name="{name}">
+    <static>true</static>
+    <link name="marker_link">
+      <visual name="marker_visual">
+        <pose>0 0 0.04 0 0 0</pose>
+        <geometry>
+          <cylinder>
+            <radius>0.18</radius>
+            <length>0.06</length>
+          </cylinder>
+        </geometry>
+        <material>
+          <ambient>{red} {green} {blue} 1</ambient>
+          <diffuse>{red} {green} {blue} 1</diffuse>
+        </material>
+        <cast_shadows>false</cast_shadows>
+      </visual>
+    </link>
+  </model>
+</sdf>""".format(name=name, red=red, green=green, blue=blue)
+
+        pose = Pose()
+        pose.position.x = x
+        pose.position.y = y
+        pose.orientation.w = 1.0
+
+        try:
+            response = self.spawn_model(name, marker_sdf, "", pose, "world")
+            if response.success:
+                return True
+
+            if "already exists" in response.status_message.lower():
+                self.delete_visual_marker(name)
+                response = self.spawn_model(name, marker_sdf, "", pose, "world")
+                if response.success:
+                    return True
+
+            rospy.logwarn(
+                "[Gazebo marker warning] Failed to spawn %s: %s",
+                name,
+                response.status_message,
+            )
+        except rospy.ServiceException as error:
+            rospy.logwarn(
+                "[Gazebo marker warning] Failed to spawn %s: %s", name, error
+            )
+        return False
+
+    def delete_visual_marker(self, name):
+        try:
+            response = self.delete_model(name)
+            if response.success:
+                return True
+
+            status_message = response.status_message.lower()
+            if "does not exist" in status_message or "not exist" in status_message:
+                return True
+
+            rospy.logwarn(
+                "[Gazebo marker warning] Failed to delete %s: %s",
+                name,
+                response.status_message,
+            )
+        except rospy.ServiceException as error:
+            rospy.logwarn(
+                "[Gazebo marker warning] Failed to delete %s: %s", name, error
+            )
+        return False
+
+    def update_gazebo_visual_markers(self):
+        self.delete_visual_marker("start_marker")
+        self.delete_visual_marker("goal_marker")
+        self.spawn_visual_marker(
+            "start_marker", self.odom_x, self.odom_y, (1.0, 0.0, 0.0)
+        )
+        self.spawn_visual_marker(
+            "goal_marker", self.goal_x, self.goal_y, (0.0, 1.0, 0.0)
+        )
 
     def publish_markers(self, action):
         # Publish visual data in Rviz
