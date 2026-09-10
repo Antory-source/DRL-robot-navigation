@@ -9,7 +9,7 @@ import numpy as np
 import rospy
 import sensor_msgs.point_cloud2 as pc2
 from gazebo_msgs.msg import ModelState
-from gazebo_msgs.srv import DeleteModel, SpawnModel
+from gazebo_msgs.srv import DeleteModel, SetModelState, SpawnModel
 from geometry_msgs.msg import Pose, Twist
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import PointCloud2
@@ -123,6 +123,10 @@ class GazeboEnv:
         self.reset_proxy = rospy.ServiceProxy("/gazebo/reset_world", Empty)
         self.spawn_model = rospy.ServiceProxy("/gazebo/spawn_sdf_model", SpawnModel)
         self.delete_model = rospy.ServiceProxy("/gazebo/delete_model", DeleteModel)
+        self.set_model_state = rospy.ServiceProxy(
+            "/gazebo/set_model_state", SetModelState
+        )
+        self.spawned_visual_markers = set()
         self.publisher = rospy.Publisher("goal_point", MarkerArray, queue_size=3)
         self.publisher2 = rospy.Publisher("linear_velocity", MarkerArray, queue_size=1)
         self.publisher3 = rospy.Publisher("angular_velocity", MarkerArray, queue_size=1)
@@ -436,15 +440,44 @@ class GazeboEnv:
             )
         return False
 
+    def move_visual_marker(self, name, x, y):
+        marker_state = ModelState()
+        marker_state.model_name = name
+        marker_state.pose.position.x = x
+        marker_state.pose.position.y = y
+        marker_state.pose.orientation.w = 1.0
+        marker_state.reference_frame = "world"
+
+        try:
+            response = self.set_model_state(marker_state)
+            if response.success:
+                return True
+
+            rospy.logwarn(
+                "[Gazebo marker warning] Failed to move %s: %s",
+                name,
+                response.status_message,
+            )
+        except rospy.ServiceException as error:
+            rospy.logwarn(
+                "[Gazebo marker warning] Failed to move %s: %s", name, error
+            )
+        return False
+
     def update_gazebo_visual_markers(self):
-        self.delete_visual_marker("start_marker")
-        self.delete_visual_marker("goal_marker")
-        self.spawn_visual_marker(
-            "start_marker", self.odom_x, self.odom_y, (1.0, 0.0, 0.0)
+        markers = (
+            ("start_marker", self.odom_x, self.odom_y, (1.0, 0.0, 0.0)),
+            ("goal_marker", self.goal_x, self.goal_y, (0.0, 1.0, 0.0)),
         )
-        self.spawn_visual_marker(
-            "goal_marker", self.goal_x, self.goal_y, (0.0, 1.0, 0.0)
-        )
+
+        for name, x, y, color in markers:
+            if name in self.spawned_visual_markers:
+                if self.move_visual_marker(name, x, y):
+                    continue
+                self.spawned_visual_markers.discard(name)
+
+            if self.spawn_visual_marker(name, x, y, color):
+                self.spawned_visual_markers.add(name)
 
     def publish_markers(self, action):
         # Publish visual data in Rviz
